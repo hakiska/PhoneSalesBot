@@ -10,7 +10,7 @@
 import logging
 from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -345,6 +345,19 @@ def _payment_info(sale: dict) -> str:
     return info
 
 
+# ---------- Меню команд ----------
+
+async def set_bot_commands(app):
+    """Устанавливает кнопку меню с командами."""
+    await app.bot.set_my_commands([
+        BotCommand("report", "Продажи за сегодня"),
+        BotCommand("excel", "Скачать Excel"),
+        BotCommand("ret", "Возврат товара"),
+        BotCommand("cancel", "Удалить последнюю запись"),
+        BotCommand("help", "Справка"),
+    ])
+
+
 # ---------- Запуск ----------
 
 def main():
@@ -353,7 +366,7 @@ def main():
         print("   Получить токен: напиши /newbot в @BotFather в Telegram")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(set_bot_commands).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
