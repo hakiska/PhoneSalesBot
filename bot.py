@@ -434,9 +434,9 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _handle_exchange_input(update, ctx, exchange_data, text)
         return
 
-    sales = parse_sale_message(text)
+    parsed = parse_sale_message(text)
 
-    if not sales:
+    if not parsed:
         await update.message.reply_text(
             "Не понял формат. Пример:\n"
             "Note 9s 1 * 9500 нал\n"
@@ -444,6 +444,17 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "A54 1 * 8000 Д Долг"
         )
         return
+
+    # Если есть ошибки парсинга — показываем их
+    if isinstance(parsed, dict):
+        errors = parsed.get("errors", [])
+        sales = parsed.get("sales", [])
+        if errors:
+            await update.message.reply_text("\n".join(errors))
+        if not sales:
+            return
+    else:
+        sales = parsed
 
     for sale in sales:
         # Ищем полное название в каталоге
@@ -472,12 +483,6 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"pick_{pending_key}_{i}"
                     )
                 ])
-            buttons.append([
-                InlineKeyboardButton(
-                    f"Оставить: {sale['product']}",
-                    callback_data=f"pick_{pending_key}_asis"
-                )
-            ])
 
             ctx.bot_data[f"{pending_key}_matches"] = matches[:10]
 
@@ -488,13 +493,10 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
 
         else:
-            sale_id = _save_sale(seller, sale, sale["product"])
-            payment_info = _payment_info(sale)
-            debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
-            client_mark = f" | {sale['client']}" if sale.get("client") else ""
+            # НЕ записываем — товара нет в каталоге
             await update.message.reply_text(
-                f"#{sale_id} {sale['product']} (нет в каталоге)\n"
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
+                f"Товар \"{sale['product']}\" не найден в каталоге.\n"
+                f"Проверьте название и попробуйте снова."
             )
 
 

@@ -3,41 +3,54 @@
 import re
 from config import KASPI_RECIPIENTS, PAYMENT_CASH, PAYMENT_KASPI
 
+# Все допустимые коды оплаты (нижний регистр)
+VALID_PAYMENT_CODES = {"нал", "наличные", "н"} | set(KASPI_RECIPIENTS.keys())
 
-def parse_payment_code(code: str) -> tuple[str, str]:
+
+def has_cyrillic_in_model(text: str) -> bool:
+    """Проверяет есть ли кириллица в названии модели."""
+    for ch in text:
+        if '\u0400' <= ch <= '\u04FF':
+            return True
+    return False
+
+
+def parse_payment_code(code: str) -> tuple[str, str] | None:
     """Определяет тип оплаты и получателя.
 
     Returns:
-        (тип_оплаты, получатель)
+        (тип_оплаты, получатель) или None если код невалидный.
     """
     code_lower = code.lower().strip()
 
     if code_lower in ("нал", "наличные", "н"):
         return PAYMENT_CASH, ""
 
-    # Сначала проверяем длинные коды (ра, ип), потом короткие (р, к, д)
     for key in sorted(KASPI_RECIPIENTS.keys(), key=len, reverse=True):
         if code_lower == key:
             return PAYMENT_KASPI, KASPI_RECIPIENTS[key]
 
-    return PAYMENT_KASPI, code  # неизвестный код — сохраняем как есть
+    return None
 
 
-def parse_sale_message(text: str) -> list[dict] | None:
+def is_valid_payment(code: str) -> bool:
+    """Проверяет является ли слово допустимым кодом оплаты."""
+    return code.lower().strip() in VALID_PAYMENT_CODES
+
+
+def parse_sale_message(text: str) -> list | dict | None:
     """Парсит одно или несколько сообщений о продаже.
 
-    Формат строки: <товар> <кол-во> * <цена> <оплата> [имя клиента] [Долг]
-    Примеры:
-        Note 9s 1 * 9500 нал
-        11 Pro GX original 1 * 11 000 K
-        A54 2 * 8000 Д Долг
-        11 pro ori 1 * 7500 нал Азамат
-        11 pro ori 1 * 7500 нал Азамат Долг
+    Формат: <товар> <кол-во> * <цена> <оплата> [имя] [Долг]
+    Оплата и имя могут идти в любом порядке.
 
     Returns:
-        Список словарей или None.
+        list[dict] — если всё ок
+        dict с ключами errors/sales — если есть ошибки
+        None — не удалось распарсить
     """
     results = []
+    errors = []
 
     for line in text.strip().split("\n"):
         line = line.strip()
@@ -45,33 +58,29 @@ def parse_sale_message(text: str) -> list[dict] | None:
             continue
 
         parsed = _parse_single_line(line)
-        if parsed:
+        if isinstance(parsed, str):
+            errors.append(parsed)
+        elif parsed:
             results.append(parsed)
+
+    if errors:
+        return {"errors": errors, "sales": results}
 
     return results if results else None
 
 
-def _parse_single_line(line: str) -> dict | None:
+def _parse_single_line(line: str) -> dict | str | None:
     """Парсит одну строку продажи."""
 
-    # 1. Убираем "Долг" с конца
-    is_debt = False
-    debt_match = re.search(r'\s+(долг|Долг|ДОЛГ)\s*$', line)
-    if debt_match:
-        is_debt = True
-        line = line[:debt_match.start()]
-
-    # 2. Пробуем с * : <товар> <кол-во> * <цена> <оплата> [имя]
-    #    После оплаты может быть имя клиента (одно слово с заглавной)
+    # Паттерн: <товар> <кол-во> * <цена> <остаток...>
     match = re.match(
-        r'^(.+?)\s+(\d+)\s*\*\s*([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)(?:\s+([A-ZА-ЯЁ][a-zа-яё]+))?\s*$',
+        r'^(.+?)\s+(\d+)\s*\*\s*([\d\s]+?)\s+(.+)$',
         line
     )
 
     if not match:
-        # Без *
         match = re.match(
-            r'^(.+?)\s+(\d+)\s+([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)(?:\s+([A-ZА-ЯЁ][a-zа-яё]+))?\s*$',
+            r'^(.+?)\s+(\d+)\s+([\d\s]+?)\s+(.+)$',
             line
         )
 
@@ -81,15 +90,42 @@ def _parse_single_line(line: str) -> dict | None:
     product = match.group(1).strip()
     qty = int(match.group(2))
     price_str = match.group(3).replace(" ", "")
-    payment_code = match.group(4)
-    client_name = match.group(5) or ""
+    tail = match.group(4).strip()
 
     try:
         price = int(price_str)
     except ValueError:
         return None
 
-    payment_type, recipient = parse_payment_code(payment_code)
+    # Проверяем кириллицу в названии модели
+    if has_cyrillic_in_model(product):
+        return f"Модель \"{product}\" написана кириллицей. Напишите латиницей."
+
+    # Разбираем хвост: оплата, имя клиента, долг — в любом порядке
+    tail_words = tail.split()
+
+    payment_code = None
+    is_debt = False
+    remaining = []
+
+    for word in tail_words:
+        if word.lower() == "долг":
+            is_debt = True
+        elif payment_code is None and is_valid_payment(word):
+            payment_code = word
+        else:
+            remaining.append(word)
+
+    if payment_code is None:
+        return f"Не указан вид оплаты для \"{product}\". Допустимые: нал, К, Д, Р, Ра, ИП"
+
+    client_name = " ".join(remaining)
+
+    payment_result = parse_payment_code(payment_code)
+    if payment_result is None:
+        return f"Неизвестный вид оплаты \"{payment_code}\""
+
+    payment_type, recipient = payment_result
 
     return {
         "product": product,
