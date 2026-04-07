@@ -172,7 +172,8 @@ async def cmd_debts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         payment_info = d["payment_type"]
         if d["recipient"]:
             payment_info += f" ({d['recipient']})"
-        lines.append(f"{i}. {d['product']} — {d['qty']}x{d['price']:,} = {d['total']:,} тг [{payment_info}]")
+        client_mark = f" | {d['client']}" if d.get("client") else ""
+        lines.append(f"{i}. {d['product']} — {d['qty']}x{d['price']:,} = {d['total']:,} тг [{payment_info}]{client_mark}")
         total += d["total"]
 
     lines.append(f"\nИтого в долг: {total:,} тг")
@@ -310,8 +311,8 @@ async def cmd_exchange(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     buttons = []
 
     for i, s in enumerate(sales, 1):
-        lines.append(f"{i}. {s['product']} — {s['price']:,} тг")
-        label = f"{i}. {s['product'][:30]} — {s['price']:,}"
+        lines.append(f"{i}. {s['product']} — {s['qty']}шт x {s['price']:,} тг")
+        label = f"{i}. {s['product'][:25]} — {s['qty']}шт"
         buttons.append([
             InlineKeyboardButton(label, callback_data=f"exch_{s['id']}")
         ])
@@ -334,7 +335,7 @@ async def handle_exchange_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
         await query.edit_message_text("Обмен отменён.")
         return
 
-    if data.startswith("exch_"):
+    if data.startswith("exch_") and not data.startswith("exch_qty_"):
         sale_id = int(data.replace("exch_", ""))
         sale = get_sale_by_id(sale_id)
 
@@ -342,22 +343,77 @@ async def handle_exchange_callback(update: Update, ctx: ContextTypes.DEFAULT_TYP
             await query.edit_message_text("Запись не найдена.")
             return
 
-        # Сохраняем в bot_data и просим написать новый товар
-        user_id = update.effective_user.id
-        ctx.bot_data[f"exchange_{user_id}"] = {
-            "sale_id": sale_id,
-            "product_out": sale["product"],
-            "price_out": sale["price"],
-            "seller": query.from_user.first_name,
-        }
+        if sale["qty"] == 1:
+            # Одна штука — сразу переходим к вводу нового товара
+            user_id = update.effective_user.id
+            ctx.bot_data[f"exchange_{user_id}"] = {
+                "sale_id": sale_id,
+                "product_out": sale["product"],
+                "price_out": sale["price"],
+                "qty_out": 1,
+                "seller": query.from_user.first_name,
+            }
 
-        await query.edit_message_text(
-            f"Обмен: {sale['product']} ({sale['price']:,} тг)\n\n"
-            f"Напишите новый товар в формате:\n"
-            f"<название> <цена> <оплата>\n\n"
-            f"Пример: Note 12 pro 5g inc 4500 нал\n"
-            f"(оплата = как клиент получает разницу)"
-        )
+            await query.edit_message_text(
+                f"Обмен: {sale['product']} 1шт ({sale['price']:,} тг)\n\n"
+                f"Напишите новый товар в формате:\n"
+                f"<название> <кол-во> * <цена> <оплата>\n\n"
+                f"Пример: Note 12 pro 5g inc 1 * 4500 нал"
+            )
+        else:
+            # Несколько штук — спрашиваем сколько обменять
+            buttons = []
+            row_buttons = []
+            for n in range(1, sale["qty"] + 1):
+                row_buttons.append(
+                    InlineKeyboardButton(str(n), callback_data=f"exch_qty_{sale_id}_{n}")
+                )
+                if len(row_buttons) == 5:
+                    buttons.append(row_buttons)
+                    row_buttons = []
+            if row_buttons:
+                buttons.append(row_buttons)
+            buttons.append([InlineKeyboardButton("Отмена", callback_data="exch_cancel")])
+
+            await query.edit_message_text(
+                f"{sale['product']} — {sale['qty']} шт по {sale['price']:,} тг\n"
+                f"Сколько штук обменять?",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+
+
+async def handle_exchange_qty_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора кол-ва для обмена."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    # exch_qty_<sale_id>_<qty>
+    parts = data.split("_")
+    sale_id = int(parts[2])
+    qty_out = int(parts[3])
+
+    sale = get_sale_by_id(sale_id)
+    if not sale:
+        await query.edit_message_text("Запись не найдена.")
+        return
+
+    user_id = update.effective_user.id
+    ctx.bot_data[f"exchange_{user_id}"] = {
+        "sale_id": sale_id,
+        "product_out": sale["product"],
+        "price_out": sale["price"],
+        "qty_out": qty_out,
+        "seller": query.from_user.first_name,
+    }
+
+    total_out = qty_out * sale["price"]
+    await query.edit_message_text(
+        f"Обмен: {sale['product']} {qty_out}шт ({total_out:,} тг)\n\n"
+        f"Напишите новый товар в формате:\n"
+        f"<название> <кол-во> * <цена> <оплата>\n\n"
+        f"Пример: Note 12 pro 5g inc 1 * 4500 нал"
+    )
 
 
 # ---------- Обработка сообщений ----------
@@ -446,22 +502,24 @@ async def _handle_exchange_input(update, ctx, exchange_data, text):
     """Обработка ввода нового товара для обмена."""
     user_id = update.effective_user.id
 
-    # Парсим: <название> <цена> <оплата>
-    import re
-    match = re.match(r'^(.+?)\s+(\d[\d\s]*)\s+([a-zA-Zа-яА-ЯёЁ]+)$', text.strip())
+    # Парсим через основной парсер (поддерживает формат с *)
+    from parser import parse_sale_message
+    parsed = parse_sale_message(text)
 
-    if not match:
+    if not parsed:
         await update.message.reply_text(
-            "Не понял. Напишите:\n<название> <цена> <оплата>\n\nПример: Note 12 pro 4500 нал"
+            "Не понял. Напишите:\n"
+            "<название> <кол-во> * <цена> <оплата>\n\n"
+            "Пример: Note 12 pro 5g inc 1 * 4500 нал"
         )
         return
 
-    product_in = match.group(1).strip()
-    price_in = int(match.group(2).replace(" ", ""))
-    payment_code = match.group(3)
-
-    from parser import parse_payment_code
-    payment_type, recipient = parse_payment_code(payment_code)
+    sale_in = parsed[0]
+    product_in = sale_in["product"]
+    qty_in = sale_in["qty"]
+    price_in = sale_in["price"]
+    payment_type = sale_in["payment_type"]
+    recipient = sale_in["recipient"]
 
     # Ищем полное название
     matches = find_product(product_in, PRODUCTS, CATALOG)
@@ -470,19 +528,23 @@ async def _handle_exchange_input(update, ctx, exchange_data, text):
 
     product_out = exchange_data["product_out"]
     price_out = exchange_data["price_out"]
+    qty_out = exchange_data.get("qty_out", 1)
     seller = exchange_data["seller"]
     sale_id = exchange_data["sale_id"]
 
-    # Удаляем старую продажу
-    delete_sale_by_id(sale_id)
+    total_out = qty_out * price_out
+    total_in = qty_in * price_in
+
+    # Уменьшаем кол-во старой продажи (или удаляем)
+    partial_return(sale_id, qty_out)
 
     # Записываем обмен
     ex_id = add_exchange(
         seller=seller,
         product_out=product_out,
-        price_out=price_out,
+        price_out=total_out,
         product_in=product_in,
-        price_in=price_in,
+        price_in=total_in,
         payment_type=payment_type,
         recipient=recipient,
     )
@@ -491,14 +553,14 @@ async def _handle_exchange_input(update, ctx, exchange_data, text):
     add_sale(
         seller=seller,
         product=product_in,
-        qty=1,
+        qty=qty_in,
         price=price_in,
-        total=price_in,
+        total=total_in,
         payment_type=payment_type,
         recipient=recipient,
     )
 
-    difference = price_out - price_in
+    difference = total_out - total_in
 
     if difference > 0:
         diff_text = f"Возврат клиенту: {difference:,} тг"
@@ -513,8 +575,8 @@ async def _handle_exchange_input(update, ctx, exchange_data, text):
 
     await update.message.reply_text(
         f"Обмен #{ex_id}:\n"
-        f"{product_out} ({price_out:,} тг)\n"
-        f"  -> {product_in} ({price_in:,} тг)\n\n"
+        f"{product_out} {qty_out}шт ({total_out:,} тг)\n"
+        f"  -> {product_in} {qty_in}шт ({total_in:,} тг)\n\n"
         f"{diff_text} [{payment_info}]"
     )
 
@@ -616,6 +678,7 @@ def main():
     app.add_handler(CommandHandler("exchange", cmd_exchange))
     app.add_handler(CallbackQueryHandler(handle_return_qty_callback, pattern=r"^ret_qty_"))
     app.add_handler(CallbackQueryHandler(handle_return_callback, pattern=r"^ret_"))
+    app.add_handler(CallbackQueryHandler(handle_exchange_qty_callback, pattern=r"^exch_qty_"))
     app.add_handler(CallbackQueryHandler(handle_exchange_callback, pattern=r"^exch_"))
     app.add_handler(CallbackQueryHandler(handle_pick_callback, pattern=r"^pick_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sale))

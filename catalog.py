@@ -51,11 +51,17 @@ def _normalize(text: str) -> str:
     return re.sub(r'\s+', ' ', text.lower().strip())
 
 
+def _word_score(words: list[str], product_norm: str) -> int:
+    """Считает сколько слов из запроса входят в название товара."""
+    return sum(1 for w in words if w in product_norm)
+
+
 def find_product(short_name: str, products: list[str], catalog: dict[str, str]) -> list[str]:
     """Ищет товар по короткому названию.
 
     1. Сначала проверяет сохранённые маппинги (точное совпадение)
-    2. Потом ищет по вхождению в полные названия
+    2. Ищет по вхождению всех слов
+    3. Если не нашли — ищет по частичному совпадению (больше половины слов)
 
     Returns:
         Список подходящих полных названий (может быть 0, 1 или несколько).
@@ -66,21 +72,43 @@ def find_product(short_name: str, products: list[str], catalog: dict[str, str]) 
     if key in catalog:
         return [catalog[key]]
 
-    # Поиск по вхождению ключевых слов
-    matches = []
+    words = key.split()
+
+    # Поиск по вхождению ВСЕХ слов
+    exact_matches = []
     for product in products:
         norm_product = _normalize(product)
-        # Проверяем что все слова short_name входят в название товара
-        words = key.split()
         if all(w in norm_product for w in words):
-            matches.append(product)
+            exact_matches.append(product)
 
-    # Если одно совпадение — сохраняем в каталог автоматически
-    if len(matches) == 1:
-        catalog[key] = matches[0]
+    if len(exact_matches) == 1:
+        catalog[key] = exact_matches[0]
+        save_catalog(catalog)
+        return exact_matches
+
+    if exact_matches:
+        return exact_matches
+
+    # Не нашли точного — ищем частичное (хотя бы половина слов совпадает)
+    min_score = max(1, len(words) // 2)
+    scored = []
+    for product in products:
+        norm_product = _normalize(product)
+        score = _word_score(words, norm_product)
+        if score >= min_score:
+            scored.append((score, product))
+
+    # Сортируем по кол-ву совпавших слов (лучшие сверху)
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Берём только топ-10
+    partial_matches = [p for _, p in scored[:10]]
+
+    if len(partial_matches) == 1:
+        catalog[key] = partial_matches[0]
         save_catalog(catalog)
 
-    return matches
+    return partial_matches
 
 
 def add_mapping(short_name: str, full_name: str, catalog: dict[str, str]):
