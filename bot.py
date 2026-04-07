@@ -23,6 +23,7 @@ from telegram.ext import (
 from config import BOT_TOKEN
 from parser import parse_sale_message
 from catalog import load_catalog, load_products_from_json, find_product, add_mapping
+from motivation import get_sale_praise, get_sale_count_today
 from storage import (
     add_sale,
     add_exchange,
@@ -90,46 +91,72 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сегодня продаж пока нет.")
         return
 
-    lines = [f"Продажи за {datetime.now().strftime('%d.%m.%Y')}:\n"]
+    lines = [f"📊 Продажи за {datetime.now().strftime('%d.%m.%Y')}\n{'━' * 30}\n"]
     total = 0
     cash = 0
     debt_total = 0
     kaspi_by_recipient = {}
 
     for i, s in enumerate(sales, 1):
+        # Иконка по типу оплаты
+        if s.get("is_debt"):
+            icon = "📝"
+        elif s["payment_type"] == "Наличные":
+            icon = "💵"
+        else:
+            icon = "📱"
+
         payment_info = s["payment_type"]
         if s["recipient"]:
             payment_info += f" ({s['recipient']})"
-        debt_mark = " [ДОЛГ]" if s.get("is_debt") else ""
-        client_mark = f" | {s['client']}" if s.get("client") else ""
 
-        lines.append(
-            f"{i}. {s['product']} — {s['qty']}x{s['price']:,} = {s['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
-        )
+        client_mark = f"\n   👤 {s['client']}" if s.get("client") else ""
+
+        if s.get("is_debt"):
+            paid = s.get("paid_amount", 0)
+            debt = s.get("debt_amount", 0) or s["total"]
+            if paid > 0:
+                debt_info = f"\n   💳 Внёс {paid:,} | ⏳ Долг {debt:,}"
+            else:
+                debt_info = f"\n   ⏳ Долг {s['total']:,}"
+            lines.append(
+                f"{icon} {i}. {s['product']}\n"
+                f"   {s['qty']} x {s['price']:,} = {s['total']:,} тг"
+                f"{debt_info}{client_mark}\n"
+            )
+        else:
+            lines.append(
+                f"{icon} {i}. {s['product']}\n"
+                f"   {s['qty']} x {s['price']:,} = {s['total']:,} тг [{payment_info}]"
+                f"{client_mark}\n"
+            )
+
         total += s["total"]
 
         if s.get("is_debt"):
-            debt_total += s["total"]
+            debt_total += s.get("debt_amount", 0) or s["total"]
         elif s["payment_type"] == "Наличные":
             cash += s["total"]
-        elif s["recipient"]:
+        elif s.get("recipient"):
             kaspi_by_recipient[s["recipient"]] = kaspi_by_recipient.get(s["recipient"], 0) + s["total"]
 
-    lines.append(f"\nИтого: {total:,} тг")
-    lines.append(f"  Наличные: {cash:,} тг")
+    lines.append(f"{'━' * 30}")
+    lines.append(f"💰 Итого: {total:,} тг")
+    if cash:
+        lines.append(f"   💵 Наличные: {cash:,} тг")
     for name, amount in sorted(kaspi_by_recipient.items()):
-        lines.append(f"  Каспи ({name}): {amount:,} тг")
+        lines.append(f"   📱 Каспи ({name}): {amount:,} тг")
     if debt_total:
-        lines.append(f"  В долг: {debt_total:,} тг")
+        lines.append(f"   ⏳ В долг: {debt_total:,} тг")
 
     # Обмены
     exchanges = get_today_exchanges()
     if exchanges:
-        lines.append(f"\nОбмены ({len(exchanges)}):")
+        lines.append(f"\n🔄 Обмены ({len(exchanges)}):")
         for ex in exchanges:
             diff = ex["difference"]
-            diff_text = f"возврат клиенту {diff:,}" if diff > 0 else f"доплата {abs(diff):,}"
-            lines.append(f"  {ex['product_out']} ({ex['price_out']:,}) -> {ex['product_in']} ({ex['price_in']:,}) | {diff_text} тг")
+            diff_text = f"↩️ возврат {diff:,}" if diff > 0 else f"💳 доплата {abs(diff):,}"
+            lines.append(f"   {ex['product_out']}\n   ➡️ {ex['product_in']}\n   {diff_text} тг\n")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -466,7 +493,7 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(matches) == 1:
             full_name = matches[0]
             sale_id = _save_sale(seller, sale, full_name)
-            await update.message.reply_text(_format_sale_confirmation(sale, sale_id, full_name))
+            await update.message.reply_text(_format_sale_confirmation(sale, sale_id, full_name, seller))
 
         elif len(matches) > 1:
             pending_key = f"pending_{user_id}_{id(sale)}"
@@ -611,7 +638,7 @@ async def handle_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     sale_id = _save_sale(seller, sale, full_name)
 
-    await query.edit_message_text(_format_sale_confirmation(sale, sale_id, full_name))
+    await query.edit_message_text(_format_sale_confirmation(sale, sale_id, full_name, seller))
 
     ctx.bot_data.pop(pending_key, None)
     ctx.bot_data.pop(f"{pending_key}_matches", None)
@@ -634,32 +661,43 @@ def _save_sale(seller: str, sale: dict, full_name: str) -> int:
     )
 
 
-def _format_sale_confirmation(sale: dict, sale_id: int, full_name: str) -> str:
-    """Формирует текст подтверждения продажи."""
-    parts = [f"#{sale_id} {full_name}"]
+def _format_sale_confirmation(sale: dict, sale_id: int, full_name: str, seller: str = "") -> str:
+    """Формирует текст подтверждения продажи с похвалой."""
+    lines = []
 
     if sale.get("is_debt"):
         if sale.get("paid_amount", 0) > 0:
-            # Частичная оплата
-            parts.append(
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг\n"
-                f"Внесено: {sale['paid_amount']:,} тг [{sale['payment_type']}]\n"
-                f"Долг: {sale['debt_amount']:,} тг | {sale['client']}"
+            lines.append(
+                f"✅ #{sale_id} {full_name}\n"
+                f"   {sale['qty']} x {sale['price']:,} = {sale['total']:,} тг\n"
+                f"   💳 Внёс: {sale['paid_amount']:,} тг [{sale['payment_type']}]\n"
+                f"   ⏳ Долг: {sale['debt_amount']:,} тг\n"
+                f"   👤 {sale['client']}"
             )
         else:
-            # Полный долг
-            parts.append(
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг\n"
-                f"ДОЛГ: {sale['total']:,} тг | {sale['client']}"
+            lines.append(
+                f"📝 #{sale_id} {full_name}\n"
+                f"   {sale['qty']} x {sale['price']:,} = {sale['total']:,} тг\n"
+                f"   ⏳ ДОЛГ: {sale['total']:,} тг\n"
+                f"   👤 {sale['client']}"
             )
     else:
         payment_info = _payment_info(sale)
-        client_mark = f" | {sale['client']}" if sale.get("client") else ""
-        parts.append(
-            f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}"
+        icon = "💵" if sale.get("payment_type") == "Наличные" else "📱"
+        client_line = f"\n   👤 {sale['client']}" if sale.get("client") else ""
+        lines.append(
+            f"✅ #{sale_id} {full_name}\n"
+            f"   {sale['qty']} x {sale['price']:,} = {sale['total']:,} тг\n"
+            f"   {icon} {payment_info}{client_line}"
         )
 
-    return "\n".join(parts)
+    # Похвала
+    if seller:
+        count = get_sale_count_today(seller)
+        praise = get_sale_praise(seller, count)
+        lines.append(f"\n{praise}")
+
+    return "\n".join(lines)
 
 
 def _payment_info(sale: dict) -> str:
