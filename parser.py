@@ -26,14 +26,14 @@ def parse_payment_code(code: str) -> tuple[str, str]:
 def parse_sale_message(text: str) -> list[dict] | None:
     """Парсит одно или несколько сообщений о продаже.
 
-    Формат строки: <товар> <кол-во> * <цена> <оплата>
+    Формат строки: <товар> <кол-во> * <цена> <оплата> [Долг]
     Примеры:
         Note 9s 1 * 9500 нал
         11 Pro GX original 1 * 11 000 K
-        A54 2 * 8000 Д
+        A54 2 * 8000 Д Долг
 
     Returns:
-        Список словарей с полями: product, qty, price, payment_type, recipient
+        Список словарей с полями: product, qty, price, payment_type, recipient, is_debt
         или None если не удалось распарсить.
     """
     results = []
@@ -52,6 +52,13 @@ def parse_sale_message(text: str) -> list[dict] | None:
 
 def _parse_single_line(line: str) -> dict | None:
     """Парсит одну строку продажи."""
+
+    # Проверяем флаг "Долг" в конце
+    is_debt = False
+    debt_match = re.search(r'\s+(долг|Долг|ДОЛГ)\s*$', line)
+    if debt_match:
+        is_debt = True
+        line = line[:debt_match.start()]
 
     # Паттерн: <товар> <кол-во> * <цена> <оплата>
     # Цена может содержать пробелы (11 000)
@@ -89,4 +96,5 @@ def _parse_single_line(line: str) -> dict | None:
         "total": qty * price,
         "payment_type": payment_type,
         "recipient": recipient,
+        "is_debt": is_debt,
     }
