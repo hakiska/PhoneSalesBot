@@ -26,15 +26,16 @@ def parse_payment_code(code: str) -> tuple[str, str]:
 def parse_sale_message(text: str) -> list[dict] | None:
     """Парсит одно или несколько сообщений о продаже.
 
-    Формат строки: <товар> <кол-во> * <цена> <оплата> [Долг]
+    Формат строки: <товар> <кол-во> * <цена> <оплата> [имя клиента] [Долг]
     Примеры:
         Note 9s 1 * 9500 нал
         11 Pro GX original 1 * 11 000 K
         A54 2 * 8000 Д Долг
+        11 pro ori 1 * 7500 нал Азамат
+        11 pro ori 1 * 7500 нал Азамат Долг
 
     Returns:
-        Список словарей с полями: product, qty, price, payment_type, recipient, is_debt
-        или None если не удалось распарсить.
+        Список словарей или None.
     """
     results = []
 
@@ -53,24 +54,24 @@ def parse_sale_message(text: str) -> list[dict] | None:
 def _parse_single_line(line: str) -> dict | None:
     """Парсит одну строку продажи."""
 
-    # Проверяем флаг "Долг" в конце
+    # 1. Убираем "Долг" с конца
     is_debt = False
     debt_match = re.search(r'\s+(долг|Долг|ДОЛГ)\s*$', line)
     if debt_match:
         is_debt = True
         line = line[:debt_match.start()]
 
-    # Паттерн: <товар> <кол-во> * <цена> <оплата>
-    # Цена может содержать пробелы (11 000)
+    # 2. Пробуем с * : <товар> <кол-во> * <цена> <оплата> [имя]
+    #    После оплаты может быть имя клиента (одно слово с заглавной)
     match = re.match(
-        r'^(.+?)\s+(\d+)\s*\*\s*([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)$',
+        r'^(.+?)\s+(\d+)\s*\*\s*([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)(?:\s+([A-ZА-ЯЁ][a-zа-яё]+))?\s*$',
         line
     )
 
     if not match:
-        # Попробуем без * : <товар> <кол-во> <цена> <оплата>
+        # Без *
         match = re.match(
-            r'^(.+?)\s+(\d+)\s+([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)$',
+            r'^(.+?)\s+(\d+)\s+([\d\s]+?)\s+([a-zA-Zа-яА-ЯёЁ]+)(?:\s+([A-ZА-ЯЁ][a-zа-яё]+))?\s*$',
             line
         )
 
@@ -81,6 +82,7 @@ def _parse_single_line(line: str) -> dict | None:
     qty = int(match.group(2))
     price_str = match.group(3).replace(" ", "")
     payment_code = match.group(4)
+    client_name = match.group(5) or ""
 
     try:
         price = int(price_str)
@@ -97,4 +99,5 @@ def _parse_single_line(line: str) -> dict | None:
         "payment_type": payment_type,
         "recipient": recipient,
         "is_debt": is_debt,
+        "client": client_name,
     }

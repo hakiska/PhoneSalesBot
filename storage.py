@@ -24,7 +24,8 @@ def get_db() -> sqlite3.Connection:
             total INTEGER NOT NULL,
             payment_type TEXT NOT NULL,
             recipient TEXT DEFAULT '',
-            is_debt INTEGER DEFAULT 0
+            is_debt INTEGER DEFAULT 0,
+            client TEXT DEFAULT ''
         )
     """)
     conn.execute("""
@@ -41,24 +42,28 @@ def get_db() -> sqlite3.Connection:
             recipient TEXT DEFAULT ''
         )
     """)
-    # Миграция: добавляем is_debt если его нет
+    # Миграции
     try:
         conn.execute("SELECT is_debt FROM sales LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE sales ADD COLUMN is_debt INTEGER DEFAULT 0")
+    try:
+        conn.execute("SELECT client FROM sales LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE sales ADD COLUMN client TEXT DEFAULT ''")
     conn.commit()
     return conn
 
 
 def add_sale(seller: str, product: str, qty: int, price: int,
              total: int, payment_type: str, recipient: str,
-             is_debt: bool = False) -> int:
+             is_debt: bool = False, client: str = "") -> int:
     """Добавляет продажу. Возвращает ID записи."""
     conn = get_db()
     cur = conn.execute(
-        """INSERT INTO sales (timestamp, seller, product, qty, price, total, payment_type, recipient, is_debt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (datetime.now().isoformat(), seller, product, qty, price, total, payment_type, recipient, int(is_debt))
+        """INSERT INTO sales (timestamp, seller, product, qty, price, total, payment_type, recipient, is_debt, client)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (datetime.now().isoformat(), seller, product, qty, price, total, payment_type, recipient, int(is_debt), client)
     )
     conn.commit()
     sale_id = cur.lastrowid
@@ -208,7 +213,7 @@ def get_today_debts() -> list[dict]:
 
 
 def _row_to_dict(row) -> dict:
-    columns = ["id", "timestamp", "seller", "product", "qty", "price", "total", "payment_type", "recipient", "is_debt"]
+    columns = ["id", "timestamp", "seller", "product", "qty", "price", "total", "payment_type", "recipient", "is_debt", "client"]
     d = {}
     for i, col in enumerate(columns):
         if i < len(row):
@@ -229,7 +234,7 @@ def export_to_excel(sales: list[dict], filename: str = None) -> str:
     ws.title = "Продажи"
 
     # Заголовки
-    headers = ["No", "Время", "Продавец", "Товар", "Кол-во", "Цена", "Сумма", "Оплата", "Получатель", "Долг"]
+    headers = ["No", "Время", "Продавец", "Товар", "Кол-во", "Цена", "Сумма", "Оплата", "Получатель", "Клиент", "Долг"]
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF", size=11)
     thin_border = Border(
@@ -260,6 +265,7 @@ def export_to_excel(sales: list[dict], filename: str = None) -> str:
             sale["total"],
             sale["payment_type"],
             sale["recipient"],
+            sale.get("client", ""),
             "Долг" if sale.get("is_debt") else "",
         ]
         for col, value in enumerate(row_data, 1):
@@ -322,7 +328,7 @@ def export_to_excel(sales: list[dict], filename: str = None) -> str:
             row += 1
 
     # Ширина колонок
-    widths = [5, 8, 12, 30, 8, 12, 12, 12, 12, 8]
+    widths = [5, 8, 12, 30, 8, 12, 12, 12, 12, 15, 8]
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 

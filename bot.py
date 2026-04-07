@@ -26,7 +26,6 @@ from catalog import load_catalog, load_products_from_json, find_product, add_map
 from storage import (
     add_sale,
     add_exchange,
-    delete_last_sale,
     delete_sale_by_id,
     get_sale_by_id,
     partial_return,
@@ -57,7 +56,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Просто пишите продажи как в тетрадь:\n"
         "  Note 9s 1 * 9500 нал\n"
         "  11 Pro GX original 1 * 11000 К\n"
-        "  A54 1 * 8000 Д Долг\n\n"
+        "  A54 1 * 8000 Д Долг\n"
+        "  11 pro ori 1 * 7500 нал Азамат\n\n"
         "Можно несколько строк в одном сообщении.\n\n"
         "Оплата:\n"
         "  нал — наличные\n"
@@ -65,15 +65,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "  Д — Каспи Диана\n"
         "  Р — Каспи Рауф\n"
         "  Ра — Каспи Разия\n"
-        "  ИП — Каспи ИП\n"
-        "  + Долг в конце — продажа в долг\n\n"
+        "  ИП — Каспи ИП\n\n"
+        "После оплаты можно написать имя клиента\n"
+        "В конце можно добавить Долг\n\n"
         "Команды:\n"
         "  /report — продажи за сегодня\n"
         "  /excel — скачать Excel за сегодня\n"
         "  /ret — возврат товара\n"
         "  /exchange — обмен товара\n"
         "  /debts — список долгов\n"
-        "  /cancel — удалить последнюю запись\n"
         "  /help — эта справка"
     )
 
@@ -101,9 +101,10 @@ async def cmd_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if s["recipient"]:
             payment_info += f" ({s['recipient']})"
         debt_mark = " [ДОЛГ]" if s.get("is_debt") else ""
+        client_mark = f" | {s['client']}" if s.get("client") else ""
 
         lines.append(
-            f"{i}. {s['product']} — {s['qty']}x{s['price']:,} = {s['total']:,} тг [{payment_info}]{debt_mark}"
+            f"{i}. {s['product']} — {s['qty']}x{s['price']:,} = {s['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
         )
         total += s["total"]
 
@@ -156,15 +157,6 @@ async def cmd_excel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         filename=filename,
         caption=f"Отчёт за {date_str} — {len(sales)} продаж, итого {sum(s['total'] for s in sales):,} тг"
     )
-
-
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Удалить последнюю запись продавца."""
-    seller = update.effective_user.first_name
-    if delete_last_sale(seller):
-        await update.message.reply_text("Последняя запись удалена.")
-    else:
-        await update.message.reply_text("Нечего удалять.")
 
 
 async def cmd_debts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -406,9 +398,10 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sale_id = _save_sale(seller, sale, full_name)
             payment_info = _payment_info(sale)
             debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
+            client_mark = f" | {sale['client']}" if sale.get("client") else ""
             await update.message.reply_text(
                 f"#{sale_id} {full_name}\n"
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{debt_mark}"
+                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
             )
 
         elif len(matches) > 1:
@@ -442,9 +435,10 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             sale_id = _save_sale(seller, sale, sale["product"])
             payment_info = _payment_info(sale)
             debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
+            client_mark = f" | {sale['client']}" if sale.get("client") else ""
             await update.message.reply_text(
                 f"#{sale_id} {sale['product']} (нет в каталоге)\n"
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{debt_mark}"
+                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
             )
 
 
@@ -557,10 +551,11 @@ async def handle_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sale_id = _save_sale(seller, sale, full_name)
     payment_info = _payment_info(sale)
     debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
+    client_mark = f" | {sale['client']}" if sale.get("client") else ""
 
     await query.edit_message_text(
         f"#{sale_id} {full_name}\n"
-        f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{debt_mark}"
+        f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
     )
 
     ctx.bot_data.pop(pending_key, None)
@@ -578,6 +573,7 @@ def _save_sale(seller: str, sale: dict, full_name: str) -> int:
         payment_type=sale["payment_type"],
         recipient=sale["recipient"],
         is_debt=sale.get("is_debt", False),
+        client=sale.get("client", ""),
     )
 
 
@@ -598,7 +594,6 @@ async def set_bot_commands(app):
         BotCommand("ret", "Возврат товара"),
         BotCommand("exchange", "Обмен товара"),
         BotCommand("debts", "Список долгов"),
-        BotCommand("cancel", "Удалить последнюю запись"),
         BotCommand("help", "Справка"),
     ])
 
@@ -616,7 +611,6 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("excel", cmd_excel))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("debts", cmd_debts))
     app.add_handler(CommandHandler("ret", cmd_return))
     app.add_handler(CommandHandler("exchange", cmd_exchange))
