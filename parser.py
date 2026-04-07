@@ -41,8 +41,10 @@ def is_valid_payment(code: str) -> bool:
 def parse_sale_message(text: str) -> list | dict | None:
     """Парсит одно или несколько сообщений о продаже.
 
-    Формат: <товар> <кол-во> * <цена> <оплата> [имя] [Долг]
-    Оплата и имя могут идти в любом порядке.
+    Форматы:
+        A53 1*5000 нал Малик              — обычная продажа
+        A53 1*5000 Малик Долг             — полный долг
+        A53 1*5000 нал 3000 Малик Долг    — внёс 3000, долг 2000
 
     Returns:
         list[dict] — если всё ок
@@ -101,39 +103,70 @@ def _parse_single_line(line: str) -> dict | str | None:
     if has_cyrillic_in_model(product):
         return f"Модель \"{product}\" написана кириллицей. Напишите латиницей."
 
-    # Разбираем хвост: оплата, имя клиента, долг — в любом порядке
+    # Разбираем хвост: оплата, сумма внесения, имя клиента, долг
     tail_words = tail.split()
 
     payment_code = None
+    paid_amount = 0
     is_debt = False
     remaining = []
 
-    for word in tail_words:
+    i = 0
+    while i < len(tail_words):
+        word = tail_words[i]
+
         if word.lower() == "долг":
             is_debt = True
         elif payment_code is None and is_valid_payment(word):
             payment_code = word
+            # Проверяем: следующее слово — сумма внесения? (число после оплаты)
+            if i + 1 < len(tail_words) and tail_words[i + 1].replace(" ", "").isdigit():
+                paid_amount = int(tail_words[i + 1].replace(" ", ""))
+                i += 1  # пропускаем число
         else:
             remaining.append(word)
 
-    if payment_code is None:
+        i += 1
+
+    # Если долг — оплата не обязательна
+    if not is_debt and payment_code is None:
         return f"Не указан вид оплаты для \"{product}\". Допустимые: нал, К, Д, Р, Ра, ИП"
 
+    # Имя клиента обязательно при долге
     client_name = " ".join(remaining)
+    if is_debt and not client_name:
+        return f"Для долга укажите имя клиента. Пример: {product} {qty}*{price} Имя Долг"
 
-    payment_result = parse_payment_code(payment_code)
-    if payment_result is None:
-        return f"Неизвестный вид оплаты \"{payment_code}\""
+    # Определяем оплату
+    payment_type = ""
+    recipient = ""
+    if payment_code:
+        payment_result = parse_payment_code(payment_code)
+        if payment_result is None:
+            return f"Неизвестный вид оплаты \"{payment_code}\""
+        payment_type, recipient = payment_result
 
-    payment_type, recipient = payment_result
+    total = qty * price
+
+    # Считаем долг
+    if is_debt and paid_amount > 0:
+        debt_amount = total - paid_amount
+    elif is_debt:
+        debt_amount = total
+        paid_amount = 0
+    else:
+        debt_amount = 0
+        paid_amount = total
 
     return {
         "product": product,
         "qty": qty,
         "price": price,
-        "total": qty * price,
+        "total": total,
         "payment_type": payment_type,
         "recipient": recipient,
         "is_debt": is_debt,
         "client": client_name,
+        "paid_amount": paid_amount,
+        "debt_amount": debt_amount,
     }

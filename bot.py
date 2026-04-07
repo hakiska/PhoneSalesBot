@@ -167,16 +167,19 @@ async def cmd_debts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["Долги за сегодня:\n"]
-    total = 0
+    total_debt = 0
     for i, d in enumerate(debts, 1):
-        payment_info = d["payment_type"]
-        if d["recipient"]:
-            payment_info += f" ({d['recipient']})"
-        client_mark = f" | {d['client']}" if d.get("client") else ""
-        lines.append(f"{i}. {d['product']} — {d['qty']}x{d['price']:,} = {d['total']:,} тг [{payment_info}]{client_mark}")
-        total += d["total"]
+        client = d.get("client", "?")
+        paid = d.get("paid_amount", 0)
+        debt = d.get("debt_amount", 0) or d["total"]
 
-    lines.append(f"\nИтого в долг: {total:,} тг")
+        if paid > 0:
+            lines.append(f"{i}. {client} — {d['product']} ({d['total']:,} тг) внёс {paid:,}, долг {debt:,} тг")
+        else:
+            lines.append(f"{i}. {client} — {d['product']} ({d['total']:,} тг) долг {debt:,} тг")
+        total_debt += debt
+
+    lines.append(f"\nИтого долг: {total_debt:,} тг")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -463,13 +466,7 @@ async def handle_sale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(matches) == 1:
             full_name = matches[0]
             sale_id = _save_sale(seller, sale, full_name)
-            payment_info = _payment_info(sale)
-            debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
-            client_mark = f" | {sale['client']}" if sale.get("client") else ""
-            await update.message.reply_text(
-                f"#{sale_id} {full_name}\n"
-                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
-            )
+            await update.message.reply_text(_format_sale_confirmation(sale, sale_id, full_name))
 
         elif len(matches) > 1:
             pending_key = f"pending_{user_id}_{id(sale)}"
@@ -613,14 +610,8 @@ async def handle_pick_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         add_mapping(sale["product"], full_name, CATALOG)
 
     sale_id = _save_sale(seller, sale, full_name)
-    payment_info = _payment_info(sale)
-    debt_mark = " [ДОЛГ]" if sale["is_debt"] else ""
-    client_mark = f" | {sale['client']}" if sale.get("client") else ""
 
-    await query.edit_message_text(
-        f"#{sale_id} {full_name}\n"
-        f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}{debt_mark}"
-    )
+    await query.edit_message_text(_format_sale_confirmation(sale, sale_id, full_name))
 
     ctx.bot_data.pop(pending_key, None)
     ctx.bot_data.pop(f"{pending_key}_matches", None)
@@ -634,16 +625,46 @@ def _save_sale(seller: str, sale: dict, full_name: str) -> int:
         qty=sale["qty"],
         price=sale["price"],
         total=sale["total"],
-        payment_type=sale["payment_type"],
-        recipient=sale["recipient"],
+        payment_type=sale.get("payment_type", ""),
+        recipient=sale.get("recipient", ""),
         is_debt=sale.get("is_debt", False),
         client=sale.get("client", ""),
+        paid_amount=sale.get("paid_amount", 0),
+        debt_amount=sale.get("debt_amount", 0),
     )
 
 
+def _format_sale_confirmation(sale: dict, sale_id: int, full_name: str) -> str:
+    """Формирует текст подтверждения продажи."""
+    parts = [f"#{sale_id} {full_name}"]
+
+    if sale.get("is_debt"):
+        if sale.get("paid_amount", 0) > 0:
+            # Частичная оплата
+            parts.append(
+                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг\n"
+                f"Внесено: {sale['paid_amount']:,} тг [{sale['payment_type']}]\n"
+                f"Долг: {sale['debt_amount']:,} тг | {sale['client']}"
+            )
+        else:
+            # Полный долг
+            parts.append(
+                f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг\n"
+                f"ДОЛГ: {sale['total']:,} тг | {sale['client']}"
+            )
+    else:
+        payment_info = _payment_info(sale)
+        client_mark = f" | {sale['client']}" if sale.get("client") else ""
+        parts.append(
+            f"{sale['qty']}x{sale['price']:,} = {sale['total']:,} тг [{payment_info}]{client_mark}"
+        )
+
+    return "\n".join(parts)
+
+
 def _payment_info(sale: dict) -> str:
-    info = sale["payment_type"]
-    if sale["recipient"]:
+    info = sale.get("payment_type", "")
+    if sale.get("recipient"):
         info += f" ({sale['recipient']})"
     return info
 
